@@ -2766,6 +2766,77 @@ static void nsvg__parseGradientStop(NSVGparser* p, const char** attr)
     stop->offset = curAttr->stopOffset;
 }
 
+static void nsvg__parseUse(NSVGparser* p, const char** attr) 
+{
+	/* limited to only setting x and y attributes */
+	char const* id = NULL;
+	float dx = 0, dy = 0;
+
+	for (int i = 0; attr[i]; i += 2) {
+		if (strcmp(attr[i], "x") == 0) {
+			dx = (float) nsvg__atof(attr[i + 1]);
+		} else if (strcmp(attr[i], "y") == 0) {
+			dy = (float) nsvg__atof(attr[i + 1]);
+		} else if (strcmp(attr[i], "xlink:href") == 0) {
+			/* skip the # */
+			id = attr[i + 1] + 1;
+		} else {
+			return;
+		}
+	}
+
+	if (!id)
+		return;
+
+	NSVGshape* ret = NULL;
+	for (NSVGshape* shape = p->def_shapes; shape; shape = shape->next) {
+		if (strcmp(shape->id, id) == 0) {
+			ret = shape;
+			break;
+		}
+	}
+
+	if ((ret = nsvgDuplicateShape(ret))) {
+		for (NSVGpath *path = ret->paths; path; path = path->next) {
+			path->bounds[0] += dx;
+			path->bounds[1] += dy;
+			path->bounds[2] += dx;
+			path->bounds[3] += dy;
+
+			for (int i = 0; i < path->npts; ++i) {
+				path->pts[2 * i] += dx;
+				path->pts[2 * i + 1] += dy;
+			}
+		}
+
+		/* copy over fill gradient if applicable */
+		/* useful for tag information */
+		NSVGattrib *const head = &p->attr[p->attrHead - 1];
+		if (head->hasFill) {
+			ret->fill.color  = head->fillColor;
+			ret->fill.color |= (unsigned int)(head->fillOpacity*255) << 24;
+		}
+		else {
+			ret->fill.type = NSVG_PAINT_NONE;
+		}
+
+		if (head->hasStroke) {
+			ret->stroke.color  = head->strokeColor;
+			ret->stroke.color |= (unsigned int)(head->strokeOpacity*255) << 24;
+		}
+		else {
+			ret->stroke.type = NSVG_PAINT_NONE;
+		}
+
+		if (p->image->shapes == NULL)
+			p->image->shapes = ret;
+		else
+			p->shapesTail->next = ret;
+
+		p->shapesTail = ret;
+	}
+}
+
 static void nsvg__startElement(void* ud, const char* el, const char** attr)
 {
     NSVGparser* p = (NSVGparser*)ud;
@@ -2824,62 +2895,9 @@ static void nsvg__startElement(void* ud, const char* el, const char** attr)
     } else if (strcmp(el, "linearGradient") == 0) {
         nsvg__parseGradient(p, attr, NSVG_PAINT_LINEAR_GRADIENT);
     } else if (strcmp(el, "use") == 0) {
-        /* limited to only setting x and y attributes */
-
-        char const* id = NULL;
-        float dx = 0, dy = 0;
-
-        for (int i = 0; attr[i]; i += 2) {
-            if (strcmp(attr[i], "x") == 0) {
-                dx = (float) nsvg__atof(attr[i + 1]);
-            } else if (strcmp(attr[i], "y") == 0) {
-                dy = (float) nsvg__atof(attr[i + 1]);
-            } else if (strcmp(attr[i], "xlink:href") == 0) {
-                /* skip the # */
-                id = attr[i + 1] + 1;
-            } else {
-                return;
-            }
-        }
-
-        if (!id)
-            return;
-
-        NSVGshape* ret;
-        for (NSVGshape* shape = p->def_shapes; shape; shape = shape->next) {
-            if (strcmp(shape->id, id) == 0) {
-                ret = shape;
-                break;
-            }
-        }
-
-        if ((ret = nsvgDuplicateShape(ret))) {
-            for (NSVGpath *path = ret->paths; path; path = path->next) {
-                path->bounds[0] += dx;
-                path->bounds[1] += dy;
-                path->bounds[2] += dx;
-                path->bounds[3] += dy;
-
-                for (int i = 0; i < path->npts; ++i) {
-                    path->pts[2 * i] += dx;
-                    path->pts[2 * i + 1] += dy;
-                }
-            }
-
-            /* copy over fill gradient if applicable */
-            /* useful for tag information */
-            ret->fill.color = p->attr[p->attrHead - 1].fillColor;
-            ret->stroke.color = p->attr[p->attrHead - 1].strokeColor;
-
-
-            if (p->image->shapes == NULL)
-                p->image->shapes = ret;
-            else
-                p->shapesTail->next = ret;
-
-            p->shapesTail = ret;
-        }
-
+        nsvg__pushAttr(p);
+        nsvg__parseUse(p, attr);
+        nsvg__popAttr(p);
     } else if (strcmp(el, "radialGradient") == 0) {
         nsvg__parseGradient(p, attr, NSVG_PAINT_RADIAL_GRADIENT);
     } else if (strcmp(el, "stop") == 0) {
