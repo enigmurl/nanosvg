@@ -2866,6 +2866,11 @@ static void nsvg__startElement(void* ud, const char* el, const char** attr)
                 }
             }
 
+            /* copy over fill gradient if applicable */
+            /* useful for tag information */
+            ret->fill.color = p->attr[p->attrHead - 1].fillColor;
+            ret->stroke.color = p->attr[p->attrHead - 1].strokeColor;
+
 
             if (p->image->shapes == NULL)
                 p->image->shapes = ret;
@@ -3165,6 +3170,16 @@ NSVGshape* nsvgDuplicateShape(NSVGshape* p)
     res = (NSVGshape*)malloc(sizeof(NSVGshape));
 
     memcpy(res, p, sizeof(*p));
+
+	if (res->fill.type != NSVG_PAINT_COLOR) {
+		res->fill.type = NSVG_PAINT_COLOR;
+		res->fill.color = 0xFF00000U;
+	}
+
+	if (res->stroke.type != NSVG_PAINT_COLOR) {
+		res->stroke.type = NSVG_PAINT_COLOR;
+		res->stroke.color = 0xFF00000U;
+	}
 
     res->paths = nsvgDuplicatePath(p->paths);
     res->next = NULL;
