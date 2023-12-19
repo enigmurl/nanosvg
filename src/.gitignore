@@ -1,0 +1,4 @@
+nanosvg_tester.c
+*.svg
+*.out
+*.dSYM

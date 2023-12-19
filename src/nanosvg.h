@@ -175,6 +175,7 @@ NSVGimage* nsvgParse(char* input, const char* units, float dpi);
 
 // Duplicates a path.
 NSVGpath* nsvgDuplicatePath(NSVGpath* p);
+NSVGshape* nsvgDuplicateShape(NSVGshape* p);
 
 // Deletes an image.
 void nsvgDelete(NSVGimage* image);
@@ -447,6 +448,7 @@ typedef struct NSVGparser
 	int npts;
 	int cpts;
 	NSVGpath* plist;
+	NSVGshape* def_shapes;
 	NSVGimage* image;
 	NSVGgradientData* gradients;
 	NSVGshape* shapesTail;
@@ -688,6 +690,17 @@ static void nsvg__deleteParser(NSVGparser* p)
 		nsvgDelete(p->image);
 		free(p->pts);
 		free(p);
+
+
+		NSVGshape *shape = p->def_shapes, *snext;
+		while (shape != NULL) {
+			snext = shape->next;
+			nsvg__deletePaths(shape->paths);
+			nsvg__deletePaint(&shape->fill);
+			nsvg__deletePaint(&shape->stroke);
+			free(shape);
+			shape = snext;
+		}
 	}
 }
 
@@ -1014,11 +1027,16 @@ static void nsvg__addShape(NSVGparser* p)
 	shape->flags = (attr->visible ? NSVG_FLAGS_VISIBLE : 0x00);
 
 	// Add to tail
-	if (p->image->shapes == NULL)
-		p->image->shapes = shape;
-	else
-		p->shapesTail->next = shape;
-	p->shapesTail = shape;
+	if (p->defsFlag) {
+		shape->next = p->def_shapes;
+		p->def_shapes = shape;
+	} else {
+		if (p->image->shapes == NULL)
+			p->image->shapes = shape;
+		else
+			p->shapesTail->next = shape;
+		p->shapesTail = shape;
+	}
 
 	return;
 
@@ -1990,7 +2008,7 @@ static void nsvg__pathVLineTo(NSVGparser* p, float* cpx, float* cpy, float* args
 }
 
 static void nsvg__pathCubicBezTo(NSVGparser* p, float* cpx, float* cpy,
-								 float* cpx2, float* cpy2, float* args, int rel)
+		float* cpx2, float* cpy2, float* args, int rel)
 {
 	float x2, y2, cx1, cy1, cx2, cy2;
 
@@ -2019,7 +2037,7 @@ static void nsvg__pathCubicBezTo(NSVGparser* p, float* cpx, float* cpy,
 }
 
 static void nsvg__pathCubicBezShortTo(NSVGparser* p, float* cpx, float* cpy,
-									  float* cpx2, float* cpy2, float* args, int rel)
+		float* cpx2, float* cpy2, float* args, int rel)
 {
 	float x1, y1, x2, y2, cx1, cy1, cx2, cy2;
 
@@ -2049,7 +2067,7 @@ static void nsvg__pathCubicBezShortTo(NSVGparser* p, float* cpx, float* cpy,
 }
 
 static void nsvg__pathQuadBezTo(NSVGparser* p, float* cpx, float* cpy,
-								float* cpx2, float* cpy2, float* args, int rel)
+		float* cpx2, float* cpy2, float* args, int rel)
 {
 	float x1, y1, x2, y2, cx, cy;
 	float cx1, cy1, cx2, cy2;
@@ -2083,7 +2101,7 @@ static void nsvg__pathQuadBezTo(NSVGparser* p, float* cpx, float* cpy,
 }
 
 static void nsvg__pathQuadBezShortTo(NSVGparser* p, float* cpx, float* cpy,
-									 float* cpx2, float* cpy2, float* args, int rel)
+		float* cpx2, float* cpy2, float* args, int rel)
 {
 	float x1, y1, x2, y2, cx, cy;
 	float cx1, cy1, cx2, cy2;
@@ -2208,8 +2226,8 @@ static void nsvg__pathArcTo(NSVGparser* p, float* cpx, float* cpy, float* args, 
 	a1 = nsvg__vecang(1.0f,0.0f, ux,uy);	// Initial angle
 	da = nsvg__vecang(ux,uy, vx,vy);		// Delta angle
 
-//	if (vecrat(ux,uy,vx,vy) <= -1.0f) da = NSVG_PI;
-//	if (vecrat(ux,uy,vx,vy) >= 1.0f) da = 0;
+	//	if (vecrat(ux,uy,vx,vy) <= -1.0f) da = NSVG_PI;
+	//	if (vecrat(ux,uy,vx,vy) >= 1.0f) da = 0;
 
 	if (fs == 0 && da > 0)
 		da -= 2 * NSVG_PI;
@@ -2760,6 +2778,12 @@ static void nsvg__startElement(void* ud, const char* el, const char** attr)
 			nsvg__parseGradient(p, attr, NSVG_PAINT_RADIAL_GRADIENT);
 		} else if (strcmp(el, "stop") == 0) {
 			nsvg__parseGradientStop(p, attr);
+		} else if (strcmp(el, "path") == 0) {
+			if (p->pathFlag)
+				return;
+			nsvg__pushAttr(p);
+			nsvg__parsePath(p, attr);
+			nsvg__popAttr(p);
 		}
 		return;
 	}
@@ -2797,8 +2821,60 @@ static void nsvg__startElement(void* ud, const char* el, const char** attr)
 		nsvg__pushAttr(p);
 		nsvg__parsePoly(p, attr, 1);
 		nsvg__popAttr(p);
-	} else  if (strcmp(el, "linearGradient") == 0) {
+	} else if (strcmp(el, "linearGradient") == 0) {
 		nsvg__parseGradient(p, attr, NSVG_PAINT_LINEAR_GRADIENT);
+	} else if (strcmp(el, "use") == 0) {
+		/* limited to only setting x and y attributes */
+
+		char const* id = NULL;
+		float dx = 0, dy = 0;
+
+		for (int i = 0; attr[i]; i += 2) {
+			if (strcmp(attr[i], "x") == 0) {
+				dx = (float) nsvg__atof(attr[i + 1]);
+			} else if (strcmp(attr[i], "y") == 0) {
+				dy = (float) nsvg__atof(attr[i + 1]);
+			} else if (strcmp(attr[i], "xlink:href") == 0) {
+				/* skip the # */
+				id = attr[i + 1] + 1; 
+			} else {
+				return;
+			}
+		}
+
+		if (!id) 
+			return;
+		
+		NSVGshape* ret;
+		for (NSVGshape* shape = p->def_shapes; shape; shape = shape->next) {
+			if (strcmp(shape->id, id) == 0) {
+				ret = shape;
+				break;
+			}
+		}
+
+		if ((ret = nsvgDuplicateShape(ret))) {
+			for (NSVGpath *path = ret->paths; path; path = path->next) {
+				path->bounds[0] += dx;	
+				path->bounds[1] += dy;
+				path->bounds[2] += dx;	
+				path->bounds[3] += dy;
+			
+				for (int i = 0; i < path->npts; ++i) {
+					path->pts[2 * i] += dx;
+					path->pts[2 * i + 1] += dy;
+				}
+			}
+
+
+			if (p->image->shapes == NULL)
+				p->image->shapes = ret;
+			else
+				p->shapesTail->next = ret;
+
+			p->shapesTail = ret;
+		}
+
 	} else if (strcmp(el, "radialGradient") == 0) {
 		nsvg__parseGradient(p, attr, NSVG_PAINT_RADIAL_GRADIENT);
 	} else if (strcmp(el, "stop") == 0) {
@@ -3067,6 +3143,8 @@ NSVGpath* nsvgDuplicatePath(NSVGpath* p)
 
     res->closed = p->closed;
 
+    res->next = nsvgDuplicatePath(p->next);
+
     return res;
 
 error:
@@ -3076,6 +3154,24 @@ error:
     }
     return NULL;
 }
+
+NSVGshape* nsvgDuplicateShape(NSVGshape* p)
+{
+    NSVGshape* res = NULL;
+
+    if (p == NULL)
+        return NULL;
+
+    res = (NSVGshape*)malloc(sizeof(NSVGshape));
+
+    memcpy(res, p, sizeof(*p));
+
+	res->paths = nsvgDuplicatePath(p->paths);
+    res->next = NULL;
+
+    return res;
+}
+
 
 void nsvgDelete(NSVGimage* image)
 {
